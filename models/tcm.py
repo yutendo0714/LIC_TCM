@@ -21,6 +21,7 @@ from einops.layers.torch import Rearrange
 from timm.models.layers import trunc_normal_, DropPath
 import numpy as np
 import math
+from .simvq import SimVQ
 
 
 SCALES_MIN = 0.11
@@ -308,7 +309,25 @@ class SwinBlock(nn.Module):
         return trans_x
 
 class TCM(CompressionModel):
-    def __init__(self, config=[2, 2, 2, 2, 2, 2], head_dim=[8, 16, 32, 32, 16, 8], drop_path_rate=0, N=128,  M=320, num_slices=5, max_support_slices=5, **kwargs):
+    def __init__(
+        self,
+        config=[2, 2, 2, 2, 2, 2],
+        head_dim=[8, 16, 32, 32, 16, 8],
+        drop_path_rate=0,
+        N=128,
+        M=320,
+        num_slices=5,
+        max_support_slices=5,
+        use_vq=False,
+        vq_codebook_size=512,
+        vq_beta=0.25,
+        vq_proj_depth=0,
+        vq_proj_hidden_dim=None,
+        vq_proj_dropout=0.0,
+        vq_proj_use_residual=True,
+        vq_proj_type="conv",
+        **kwargs,
+    ):
         super().__init__(entropy_bottleneck_channels=N)
         self.config = config
         self.head_dim = head_dim
@@ -317,6 +336,7 @@ class TCM(CompressionModel):
         self.max_support_slices = max_support_slices
         dim = N
         self.M = M
+        self.use_vq = use_vq
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(config))]
         begin = 0
 
@@ -415,6 +435,25 @@ class TCM(CompressionModel):
 
         self.entropy_bottleneck = EntropyBottleneck(192)
         self.gaussian_conditional = GaussianConditional(None)
+        if self.use_vq:
+            if self.M % self.num_slices != 0:
+                raise ValueError("M must be divisible by num_slices when using vector quantization.")
+            slice_dim = self.M // self.num_slices
+            self.slice_vq = nn.ModuleList(
+                SimVQ(
+                    n_e=vq_codebook_size,
+                    e_dim=slice_dim,
+                    beta=vq_beta,
+                    post_proj_depth=vq_proj_depth,
+                    post_proj_hidden_dim=vq_proj_hidden_dim,
+                    post_proj_dropout=vq_proj_dropout,
+                    post_proj_use_residual=vq_proj_use_residual,
+                    post_proj_type=vq_proj_type,
+                )
+                for _ in range(self.num_slices)
+            )
+        else:
+            self.slice_vq = None
 
     def update(self, scale_table=None, force=False):
         if scale_table is None:
@@ -441,6 +480,7 @@ class TCM(CompressionModel):
         y_likelihood = []
         mu_list = []
         scale_list = []
+        vq_commit_losses = [] if self.use_vq else None
         for slice_index, y_slice in enumerate(y_slices):
             support_slices = (y_hat_slices if self.max_support_slices < 0 else y_hat_slices[:self.max_support_slices])
             mean_support = torch.cat([latent_means] + support_slices, dim=1)
@@ -463,6 +503,9 @@ class TCM(CompressionModel):
             lrp = self.lrp_transforms[slice_index](lrp_support)
             lrp = 0.5 * torch.tanh(lrp)
             y_hat_slice += lrp
+            if self.use_vq:
+                y_hat_slice, commit_loss = self._apply_vq_slice(y_hat_slice, slice_index)
+                vq_commit_losses.append(commit_loss)
 
             y_hat_slices.append(y_hat_slice)
 
@@ -472,11 +515,15 @@ class TCM(CompressionModel):
         y_likelihoods = torch.cat(y_likelihood, dim=1)
         x_hat = self.g_s(y_hat)
 
-        return {
+        output = {
             "x_hat": x_hat,
             "likelihoods": {"y": y_likelihoods, "z": z_likelihoods},
             "para":{"means": means, "scales":scales, "y":y}
         }
+        if self.use_vq:
+            vq_loss = torch.stack(vq_commit_losses).mean() if vq_commit_losses else torch.tensor(0.0, device=x_hat.device)
+            output["vq_loss"] = vq_loss
+        return output
 
     def load_state_dict(self, state_dict):
         update_registered_buffers(
@@ -547,6 +594,8 @@ class TCM(CompressionModel):
             lrp = self.lrp_transforms[slice_index](lrp_support)
             lrp = 0.5 * torch.tanh(lrp)
             y_hat_slice += lrp
+            if self.use_vq:
+                y_hat_slice, _ = self._apply_vq_slice(y_hat_slice, slice_index)
 
             y_hat_slices.append(y_hat_slice)
             y_scales.append(scale)
@@ -577,6 +626,10 @@ class TCM(CompressionModel):
         const = float(-(2 ** -0.5))
         # Using the complementary error function maximizes numerical precision.
         return half * torch.erfc(const * inputs)
+
+    def _apply_vq_slice(self, tensor, slice_index):
+        quantized_tuple, loss_breakdown = self.slice_vq[slice_index](tensor)
+        return quantized_tuple[0], loss_breakdown.commitment
 
     def decompress(self, strings, shape):
         z_hat = self.entropy_bottleneck.decompress(strings[1], shape)
@@ -617,6 +670,8 @@ class TCM(CompressionModel):
             lrp = self.lrp_transforms[slice_index](lrp_support)
             lrp = 0.5 * torch.tanh(lrp)
             y_hat_slice += lrp
+            if self.use_vq:
+                y_hat_slice, _ = self._apply_vq_slice(y_hat_slice, slice_index)
 
             y_hat_slices.append(y_hat_slice)
 
