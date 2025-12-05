@@ -9,82 +9,6 @@ import math
 
 LossBreakdown = namedtuple('LossBreakdown', ['per_sample_entropy', 'codebook_entropy', 'commitment', 'avg_probs'])
 
-
-class NonLinearProjection(nn.Module):
-    """Shared projection applied after codebook lookup."""
-
-    def __init__(
-        self,
-        dim,
-        depth=1,
-        hidden_dim=None,
-        dropout=0.0,
-        use_residual=True,
-        proj_type="conv",
-    ):
-        super().__init__()
-        assert depth >= 1, "Projection depth must be >= 1"
-        assert proj_type in {"conv", "mlp"}
-        self.use_residual = use_residual
-        self.proj_type = proj_type
-        hidden_dim = hidden_dim or dim
-        blocks = []
-        for _ in range(depth):
-            if proj_type == "conv":
-                blocks.append(
-                    nn.Sequential(
-                        nn.Conv2d(dim, hidden_dim, kernel_size=1),
-                        nn.GELU(),
-                        nn.Dropout2d(dropout) if dropout > 0 else nn.Identity(),
-                        nn.Conv2d(hidden_dim, dim, kernel_size=1),
-                    )
-                )
-            else:
-                blocks.append(
-                    nn.Sequential(
-                        nn.Linear(dim, hidden_dim),
-                        nn.GELU(),
-                        nn.Dropout(dropout) if dropout > 0 else nn.Identity(),
-                        nn.Linear(hidden_dim, dim),
-                    )
-                )
-        self.blocks = nn.ModuleList(blocks)
-
-    def forward(self, x):
-        if self.proj_type == "conv":
-            squeeze_last = False
-            if x.dim() == 3:
-                x = x.unsqueeze(-1)
-                squeeze_last = True
-            for block in self.blocks:
-                residual = x
-                x = block(x)
-                if self.use_residual:
-                    x = x + residual
-            if squeeze_last:
-                x = x.squeeze(-1)
-            return x
-
-        original_shape = x.shape
-        if x.dim() == 4:
-            tokens = rearrange(x, "b c h w -> (b h w) c")
-        elif x.dim() == 3:
-            tokens = rearrange(x, "b c l -> (b l) c")
-        else:
-            tokens = x
-        for block in self.blocks:
-            residual = tokens
-            tokens = block(tokens)
-            if self.use_residual:
-                tokens = tokens + residual
-        if len(original_shape) == 4:
-            x = rearrange(tokens, "(b h w) c -> b c h w", h=original_shape[2], w=original_shape[3])
-        elif len(original_shape) == 3:
-            x = rearrange(tokens, "(b l) c -> b c l", l=original_shape[2])
-        else:
-            x = tokens
-        return x
-
 class SimVQ(nn.Module):
     """
     Improved version over VectorQuantizer, can be used as a drop-in replacement. Mostly
@@ -93,21 +17,8 @@ class SimVQ(nn.Module):
     # NOTE: due to a bug the beta term was applied to the wrong term. for
     # backwards compatibility we use the buggy version by default, but you can
     # specify legacy=False to fix it.
-    def __init__(
-        self,
-        n_e,
-        e_dim,
-        beta=0.25,
-        remap=None,
-        unknown_index="random",
-        sane_index_shape=False,
-        legacy=True,
-        post_proj_depth=0,
-        post_proj_hidden_dim=None,
-        post_proj_dropout=0.0,
-        post_proj_use_residual=True,
-        post_proj_type="conv",
-    ):
+    def __init__(self, n_e, e_dim, beta=0.25, remap=None, unknown_index="random",
+                 sane_index_shape=False, legacy=True):
         super().__init__()
         self.n_e = n_e
         self.e_dim = e_dim
@@ -120,16 +31,6 @@ class SimVQ(nn.Module):
             p.requires_grad = False
         
         self.embedding_proj = nn.Linear(self.e_dim, self.e_dim)
-        self.post_proj = None
-        if post_proj_depth > 0:
-            self.post_proj = NonLinearProjection(
-                dim=self.e_dim,
-                depth=post_proj_depth,
-                hidden_dim=post_proj_hidden_dim,
-                dropout=post_proj_dropout,
-                use_residual=post_proj_use_residual,
-                proj_type=post_proj_type,
-            )
     
         self.remap = remap
         if self.remap is not None:
@@ -213,8 +114,7 @@ class SimVQ(nn.Module):
         if self.sane_index_shape:
             min_encoding_indices = min_encoding_indices.reshape(
                 z_q.shape[0], z_q.shape[2], z_q.shape[3])
-        
-        z_q = self._apply_post_proj(z_q)
+            
         return (z_q, torch.tensor(0.0), min_encoding_indices), LossBreakdown(torch.tensor(0.0), torch.tensor(0.0), commit_loss, torch.tensor(0.0))
 
     def get_codebook_entry(self, indices, shape):
@@ -232,12 +132,7 @@ class SimVQ(nn.Module):
             # reshape back to match original input shape
             z_q = z_q.permute(0, 3, 1, 2).contiguous()
 
-        return self._apply_post_proj(z_q)
-
-    def _apply_post_proj(self, z_q):
-        if self.post_proj is None:
-            return z_q
-        return self.post_proj(z_q)
+        return z_q
     
 
 class SimVQ1D(SimVQ):
@@ -276,7 +171,6 @@ class SimVQ1D(SimVQ):
 
         # reshape back to match original input shape
         z_q = rearrange(z_q, 'b h c -> b c h').contiguous()
-        z_q = self._apply_post_proj(z_q)
 
         if self.remap is not None:
             min_encoding_indices = min_encoding_indices.reshape(z.shape[0],-1) # add batch axis

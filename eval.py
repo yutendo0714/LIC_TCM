@@ -67,24 +67,6 @@ def parse_args(argv):
         "--real", action="store_true", default=True
     )
     parser.set_defaults(real=False)
-    parser.add_argument("--use_vq", action="store_true", help="Enable SimVQ quantizer (must match trained model)")
-    parser.add_argument("--vq_codebook_size", type=int, default=512, help="SimVQ codebook size")
-    parser.add_argument("--vq_beta", type=float, default=0.25, help="SimVQ commitment beta")
-    parser.add_argument("--vq_proj_depth", type=int, default=2, help="Projection depth after codebook")
-    parser.add_argument("--vq_proj_hidden_dim", type=int, help="Projection hidden dim")
-    parser.add_argument("--vq_proj_dropout", type=float, default=0.0, help="Projection dropout prob")
-    parser.add_argument(
-        "--vq_proj_type",
-        type=str,
-        default="conv",
-        choices=["conv", "mlp"],
-        help="Projection layer type",
-    )
-    parser.add_argument(
-        "--disable_vq_proj_residual",
-        action="store_true",
-        help="Disable residual skips in projection",
-    )
     args = parser.parse_args(argv)
     return args
 
@@ -101,21 +83,7 @@ def main(argv):
         device = 'cuda:0'
     else:
         device = 'cpu'
-    net = TCM(
-        config=[2,2,2,2,2,2],
-        head_dim=[8, 16, 32, 32, 16, 8],
-        drop_path_rate=0.0,
-        N=128,
-        M=320,
-        use_vq=args.use_vq,
-        vq_codebook_size=args.vq_codebook_size,
-        vq_beta=args.vq_beta,
-        vq_proj_depth=args.vq_proj_depth,
-        vq_proj_hidden_dim=args.vq_proj_hidden_dim,
-        vq_proj_dropout=args.vq_proj_dropout,
-        vq_proj_use_residual=not args.disable_vq_proj_residual,
-        vq_proj_type=args.vq_proj_type,
-    )
+    net = TCM(config=[2,2,2,2,2,2], head_dim=[8, 16, 32, 32, 16, 8], drop_path_rate=0.0, N=128, M=320)
     net = net.to(device)
     net.eval()
     count = 0
