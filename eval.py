@@ -66,7 +66,13 @@ def parse_args(argv):
     parser.add_argument(
         "--real", action="store_true", default=True
     )
-    parser.set_defaults(real=False)
+    parser.add_argument("--use_simvq", dest="use_simvq", action="store_true")
+    parser.add_argument("--no_simvq", dest="use_simvq", action="store_false")
+    parser.add_argument("--vq_codebook_size", type=int, default=512)
+    parser.add_argument("--vq_beta", type=float, default=0.25)
+    parser.add_argument("--vq_commit_weight", type=float, default=1.0)
+    parser.add_argument("--vq_input_norm", action="store_true", help="Normalize latents before SimVQ")
+    parser.set_defaults(real=False, use_simvq=True)
     args = parser.parse_args(argv)
     return args
 
@@ -83,7 +89,18 @@ def main(argv):
         device = 'cuda:0'
     else:
         device = 'cpu'
-    net = TCM(config=[2,2,2,2,2,2], head_dim=[8, 16, 32, 32, 16, 8], drop_path_rate=0.0, N=128, M=320)
+    net = TCM(
+        config=[2,2,2,2,2,2],
+        head_dim=[8, 16, 32, 32, 16, 8],
+        drop_path_rate=0.0,
+        N=128,
+        M=320,
+        use_simvq=args.use_simvq,
+        vq_codebook_size=args.vq_codebook_size,
+        vq_beta=args.vq_beta,
+        vq_commit_weight=args.vq_commit_weight,
+        vq_input_norm=args.vq_input_norm,
+    )
     net = net.to(device)
     net.eval()
     count = 0

@@ -119,13 +119,14 @@ class SimVQ(nn.Module):
 
     def get_codebook_entry(self, indices, shape):
         # shape specifying (batch, height, width, channel)
+        quant_codebook = self.embedding_proj(self.embedding.weight)
         if self.remap is not None:
             indices = indices.reshape(shape[0],-1) # add batch axis
             indices = self.unmap_to_all(indices)
             indices = indices.reshape(-1) # flatten again
 
         # get quantized latent vectors
-        z_q = self.embedding(indices)
+        z_q = F.embedding(indices, quant_codebook)
 
         if shape is not None:
             z_q = z_q.view(shape)
@@ -133,6 +134,22 @@ class SimVQ(nn.Module):
             z_q = z_q.permute(0, 3, 1, 2).contiguous()
 
         return z_q
+
+    def decode_indices(self, indices):
+        if self.remap is not None:
+            shape = indices.shape
+            indices = indices.reshape(shape[0], -1)
+            indices = self.unmap_to_all(indices)
+            indices = indices.reshape(shape)
+        if self.sane_index_shape:
+            b, h, w = indices.shape
+            quant_codebook = self.embedding_proj(self.embedding.weight)
+            flat = indices.reshape(b, -1)
+            z_q = F.embedding(flat, quant_codebook)
+            z_q = z_q.view(b, h, w, self.e_dim)
+            z_q = rearrange(z_q, 'b h w c -> b c h w').contiguous()
+            return z_q
+        raise NotImplementedError("decode_indices only supports sane index shapes.")
     
 
 class SimVQ1D(SimVQ):
